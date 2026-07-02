@@ -6,6 +6,10 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+# Permissions needed to create releases
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -33,6 +37,13 @@ jobs:
       - name: Build APK
         run: flutter build apk --release
 
+      - name: Rename APK with timestamp
+        run: |
+          TIMESTAMP=$(date +%Y%m%d-%H%M)
+          cp build/app/outputs/flutter-apk/app-release.apk batbox-$TIMESTAMP.apk
+          echo "APK_NAME=batbox-$TIMESTAMP.apk" >> $GITHUB_ENV
+          echo "File size: $(du -h batbox-$TIMESTAMP.apk | cut -f1)"
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -40,10 +51,35 @@ jobs:
           path: build/app/outputs/flutter-apk/app-release.apk
           retention-days: 30
 
+      - name: Create GitHub Release with APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: BatBox Build ${{ github.run_number }}
+          body: |
+            ## BatBox APK
+
+            **Build #${{ github.run_number }}**
+            **Commit:** ${{ github.sha }}
+            **Built:** ${{ github.event.head_commit.timestamp }}
+
+            ### Download
+            Tap `batbox-*.apk` below to download. Then tap to install on your phone.
+
+            ### Installation
+            1. Download the `.apk` file below
+            2. Open your Files app → Downloads
+            3. Tap the `.apk` file
+            4. Allow install from unknown sources if prompted
+            5. Tap Install
+          files: ${{ env.APK_NAME }}
+          prerelease: false
+          make_latest: true
+
       - name: Show build info
         run: |
           echo "## APK Build Complete!" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Download the APK from the Artifacts section below." >> $GITHUB_STEP_SUMMARY
+          echo "Direct APK download (no ZIP): https://github.com/${{ github.repository }}/releases/latest" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "File size: $(du -h build/app/outputs/flutter-apk/app-release.apk | cut -f1)" >> $GITHUB_STEP_SUMMARY
+          echo "File size: $(du -h ${{ env.APK_NAME }} | cut -f1)" >> $GITHUB_STEP_SUMMARY
