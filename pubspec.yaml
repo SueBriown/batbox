@@ -1,0 +1,31 @@
+name: batbox
+description: A Flutter app that listens for a reference sound and triggers the camera when matched.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.6
+  record: 7.1.0
+  camera: ^0.11.0+1
+  permission_handler: ^11.0.0
+  shared_preferences: ^2.3.0
+  just_audio: ^0.10.5
+  path_provider: ^2.1.6
+  file_picker: ^8.0.0
+  ffmpeg_kit_flutter_new: ^4.3.2
+  share_plus: ^10.0.0
+  archive: ^3.6.1
+  flutter_image_compress: ^2.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

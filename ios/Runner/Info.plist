@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>This app needs microphone access to listen for your reference sound.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>This app needs camera access to take a photo when a match is detected.</string>
+</dict>
+</plist>
