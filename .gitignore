@@ -36,3 +36,7 @@ android/key.properties
 
 # Logs
 *.log
+
+# Build artifacts
+*.zip
+batbox-fixed*.zip
