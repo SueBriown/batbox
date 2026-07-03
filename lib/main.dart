@@ -765,6 +765,44 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
     }
   }
 
+  /// Play only the trimmed portion of the active reference.
+  Future<void> _playTrimmedReference() async {
+    if (!_hasReference) {
+      setState(() => _status = 'No reference to play.');
+      return;
+    }
+    if (_isPlayingReference) {
+      await _audioPlayer.stop();
+      setState(() => _isPlayingReference = false);
+      return;
+    }
+    try {
+      final ref = _references.where((r) => r.name == _activeReferenceName).firstOrNull;
+      if (ref == null) {
+        setState(() => _status = 'No active reference.');
+        return;
+      }
+      // Apply trim to get the trimmed samples
+      final startIdx = (ref.trimStart * ref.samples.length).toInt();
+      final endIdx = (ref.trimEnd * ref.samples.length).toInt();
+      final trimmedSamples = (startIdx < endIdx && startIdx >= 0 && endIdx <= ref.samples.length)
+          ? ref.samples.sublist(startIdx, endIdx)
+          : ref.samples;
+      if (trimmedSamples.isEmpty) {
+        setState(() => _status = 'Trimmed section is empty.');
+        return;
+      }
+      final dir = await getTemporaryDirectory();
+      final path = '${dir.path}/reference_trimmed.wav';
+      await File(path).writeAsBytes(await _encodeWav(trimmedSamples));
+      await _audioPlayer.setFilePath(path);
+      await _audioPlayer.play();
+      setState(() => _isPlayingReference = true);
+    } catch (e) {
+      setState(() => _status = 'Could not play trimmed: $e');
+    }
+  }
+
   /// Save the active reference as a .wav file to the app's documents dir.
   /// The user can then access it via a file manager or 'Load from file'.
   Future<void> _saveReferenceToFile() async {
@@ -2363,7 +2401,7 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
             decoration: BoxDecoration(color: Colors.deepPurple.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(6)),
-            child: const Text('BUILD v12.2 - 2026-06-30 06:00 UTC', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.deepPurple)),
+            child: const Text('BUILD v12.3 - 2026-06-30 06:30 UTC', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.deepPurple)),
           ),
           const SizedBox(height: 16),
 
@@ -2794,6 +2832,13 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
               },
               icon: const Icon(Icons.undo),
               label: const Text('Reset trim'),
+            ),
+            const SizedBox(height: 8),
+            // Play trimmed reference button
+            FilledButton.icon(
+              onPressed: _playTrimmedReference,
+              icon: Icon(_isPlayingReference ? Icons.stop : Icons.play_arrow),
+              label: Text(_isPlayingReference ? 'Stop' : 'Play trimmed reference'),
             ),
             const SizedBox(height: 8),
           ],
