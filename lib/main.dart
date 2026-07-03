@@ -112,6 +112,11 @@ class ReferenceSound {
   double? threshold;
   // #3: Calibrated noise floor (null = use default 10% of reference energy).
   double? noiseFloor;
+  // Trim: normalized 0.0-1.0 range. trimStart=0.0 and trimEnd=1.0 = no trim.
+  // The original samples are never deleted -- trim is applied when computing
+  // features, so it's fully reversible.
+  double trimStart = 0.0;
+  double trimEnd = 1.0;
 
   ReferenceSound({required this.name, required this.filePath, this.threshold, this.noiseFloor});
 
@@ -120,6 +125,8 @@ class ReferenceSound {
     'filePath': filePath,
     if (threshold != null) 'threshold': threshold,
     if (noiseFloor != null) 'noiseFloor': noiseFloor,
+    'trimStart': trimStart,
+    'trimEnd': trimEnd,
   };
   factory ReferenceSound.fromJson(Map<String, dynamic> json) =>
       ReferenceSound(
@@ -127,7 +134,8 @@ class ReferenceSound {
         filePath: (json['filePath'] as String?) ?? '',
         threshold: (json['threshold'] as num?)?.toDouble(),
         noiseFloor: (json['noiseFloor'] as num?)?.toDouble(),
-      );
+      )..trimStart = (json['trimStart'] as num?)?.toDouble() ?? 0.0
+       ..trimEnd = (json['trimEnd'] as num?)?.toDouble() ?? 1.0;
 }
 
 // =============================================================================
@@ -233,7 +241,7 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
   // #5: Separate level for reference recording display.
   double _recordingLevel = 0.0;
   // #23: Dark mode
-  bool _isDarkMode = false;
+  bool _isDarkMode = true; // start in dark mode
   // #11: Photo compression
   bool _compressPhotos = false;
   // #21: Camera index (0=back, 1=front, 2+=other lenses)
@@ -319,9 +327,12 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
   @override
   void dispose() {
     _tabController.dispose();
+    // Stop motion detection synchronously enough to prevent further frame callbacks.
+    _isDetectingMotion = false;
     _stopMotionDetection();
     _audioSubscription?.cancel();
     _autoStopTimer?.cancel();
+    _scheduleTimer?.cancel();
     _playerStateSubscription.cancel();
     _audioPlayer.dispose();
     try { _audioRecorder.dispose(); } catch (_) {}
@@ -446,8 +457,16 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
   }
 
   void _computeReferenceFeatures(ReferenceSound ref) {
+    // Apply trim: use only the samples between trimStart and trimEnd.
+    // Original samples are preserved -- this is reversible.
+    final startIdx = (ref.trimStart * ref.samples.length).toInt();
+    final endIdx = (ref.trimEnd * ref.samples.length).toInt();
+    final trimmedSamples = (startIdx < endIdx && startIdx >= 0 && endIdx <= ref.samples.length)
+        ? ref.samples.sublist(startIdx, endIdx)
+        : ref.samples;
+
     ref.downsampled.clear();
-    ref.downsampled.addAll(_downsample(ref.samples, 10));
+    ref.downsampled.addAll(_downsample(trimmedSamples, 10));
     ref.processed.clear();
     ref.processed.addAll(_preEmphasis(ref.downsampled));
     ref.envelope.clear();
@@ -2344,7 +2363,7 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
             decoration: BoxDecoration(color: Colors.deepPurple.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(6)),
-            child: const Text('BUILD v12.0 - 2026-06-30 04:30 UTC', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.deepPurple)),
+            child: const Text('BUILD v12.2 - 2026-06-30 06:00 UTC', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.deepPurple)),
           ),
           const SizedBox(height: 16),
 
@@ -2410,7 +2429,7 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
           ExpansionTile(
             title: const Text('Schedule', style: TextStyle(fontSize: 14)),
             children: [
-              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              Wrap(alignment: WrapAlignment.center, spacing: 12, runSpacing: 8, children: [
                 TextButton.icon(
                   icon: const Icon(Icons.play_arrow),
                   label: Text(_scheduledStart != null ? _scheduledStart!.format(context) : 'Start time'),
@@ -2428,9 +2447,8 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
                   },
                 ),
               ]),
-              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              Wrap(alignment: WrapAlignment.center, spacing: 12, runSpacing: 8, children: [
                 FilledButton(onPressed: _startScheduledListening, child: const Text('Activate schedule')),
-                const SizedBox(width: 8),
                 OutlinedButton(onPressed: _stopScheduledListening, child: const Text('Cancel')),
               ]),
             ],
@@ -2557,14 +2575,19 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
   Widget _buildDropdownRow<T>(String label, List<T> values, T current, ValueChanged<T> onChanged) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2),
-      child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-        Text('$label: '),
-        DropdownButton<T>(
-          value: current,
-          items: values.map((v) => DropdownMenuItem(value: v, child: Text((v as dynamic).label as String))).toList(),
-          onChanged: (v) { if (v != null) onChanged(v); },
-        ),
-      ]),
+      // Use Wrap instead of Row so long labels don't overflow on narrow screens.
+      child: Wrap(
+        alignment: WrapAlignment.center,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Text('$label: '),
+          DropdownButton<T>(
+            value: current,
+            items: values.map((v) => DropdownMenuItem(value: v, child: Text((v as dynamic).label as String))).toList(),
+            onChanged: (v) { if (v != null) onChanged(v); },
+          ),
+        ],
+      ),
     );
   }
 
@@ -2630,10 +2653,9 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
           const SizedBox(height: 8),
           OutlinedButton.icon(onPressed: _importAudioFile, icon: const Icon(Icons.file_upload), label: const Text('Import audio (.wav, .m4a, .mp3)')),
           const SizedBox(height: 8),
-          // Save / Load reference WAV files
-          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          // Save / Load reference WAV files -- use Wrap to avoid overflow
+          Wrap(alignment: WrapAlignment.center, spacing: 12, runSpacing: 8, children: [
             OutlinedButton.icon(onPressed: _saveReferenceToFile, icon: const Icon(Icons.save), label: const Text('Save .wav')),
-            const SizedBox(width: 12),
             OutlinedButton.icon(onPressed: _loadReferenceFromFile, icon: const Icon(Icons.folder_open), label: const Text('Load .wav')),
           ]),
           const SizedBox(height: 8),
@@ -2682,7 +2704,100 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
           const SizedBox(height: 8),
           if (_hasReference)
             FilledButton.icon(onPressed: _playReferenceSound, icon: Icon(_isPlayingReference ? Icons.stop : Icons.play_arrow), label: Text(_isPlayingReference ? 'Stop' : 'Play active reference')),
-          const SizedBox(height: 8),
+          const SizedBox(height: 16),
+
+          // Trim controls (reversible -- original audio is never deleted)
+          if (_hasReference && _referenceSamples.isNotEmpty) ...[
+            const Divider(),
+            const SizedBox(height: 8),
+            const Text('Trim reference audio', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 4),
+            Text(
+              'Original: ${(_referenceSamples.length / 44100).toStringAsFixed(1)}s',
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            Builder(builder: (context) {
+              final ref = _references.where((r) => r.name == _activeReferenceName).firstOrNull;
+              final trimStart = ref?.trimStart ?? 0.0;
+              final trimEnd = ref?.trimEnd ?? 1.0;
+              final origLen = _referenceSamples.length;
+              final startSec = (trimStart * origLen / 44100).toStringAsFixed(1);
+              final endSec = (trimEnd * origLen / 44100).toStringAsFixed(1);
+              final durSec = ((trimEnd - trimStart) * origLen / 44100).toStringAsFixed(1);
+              return Text(
+                'Trimmed: $startSec s to $endSec s (duration: $durSec s)',
+                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+              );
+            }),
+            const SizedBox(height: 8),
+            // Start slider
+            Text('Start: ${(_references.where((r) => r.name == _activeReferenceName).firstOrNull?.trimStart ?? 0.0).toStringAsFixed(2)}',
+                style: const TextStyle(fontSize: 12)),
+            StatefulBuilder(builder: (context, setLocalState) {
+              final ref = _references.where((r) => r.name == _activeReferenceName).firstOrNull;
+              final ts = ref?.trimStart ?? 0.0;
+              final te = ref?.trimEnd ?? 1.0;
+              return Slider(
+                value: ts,
+                min: 0.0,
+                max: te - 0.01, // can't overlap end
+                divisions: 100,
+                label: '${(ts * _referenceSamples.length / 44100).toStringAsFixed(1)}s',
+                onChanged: (v) {
+                  if (ref != null) {
+                    ref.trimStart = v;
+                    _computeReferenceFeatures(ref);
+                    _switchToReference(ref.name);
+                    setLocalState(() {});
+                    _saveReferenceList();
+                  }
+                },
+              );
+            }),
+            // End slider
+            Text('End: ${(_references.where((r) => r.name == _activeReferenceName).firstOrNull?.trimEnd ?? 1.0).toStringAsFixed(2)}',
+                style: const TextStyle(fontSize: 12)),
+            StatefulBuilder(builder: (context, setLocalState) {
+              final ref = _references.where((r) => r.name == _activeReferenceName).firstOrNull;
+              final ts = ref?.trimStart ?? 0.0;
+              final te = ref?.trimEnd ?? 1.0;
+              return Slider(
+                value: te,
+                min: ts + 0.01, // can't overlap start
+                max: 1.0,
+                divisions: 100,
+                label: '${(te * _referenceSamples.length / 44100).toStringAsFixed(1)}s',
+                onChanged: (v) {
+                  if (ref != null) {
+                    ref.trimEnd = v;
+                    _computeReferenceFeatures(ref);
+                    _switchToReference(ref.name);
+                    setLocalState(() {});
+                    _saveReferenceList();
+                  }
+                },
+              );
+            }),
+            // Reset trim button
+            OutlinedButton.icon(
+              onPressed: () {
+                final ref = _references.where((r) => r.name == _activeReferenceName).firstOrNull;
+                if (ref != null) {
+                  ref.trimStart = 0.0;
+                  ref.trimEnd = 1.0;
+                  _computeReferenceFeatures(ref);
+                  _switchToReference(ref.name);
+                  setState(() {});
+                  _saveReferenceList();
+                  _showSnackBar('Trim reset to full length');
+                }
+              },
+              icon: const Icon(Icons.undo),
+              label: const Text('Reset trim'),
+            ),
+            const SizedBox(height: 8),
+          ],
+
           if (_isRecordingReference) ...[
             Text('Recording... ${(_referenceSamples.length / 44100).toStringAsFixed(1)}s', style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
             const SizedBox(height: 4),
@@ -2776,54 +2891,60 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
             clipBehavior: Clip.antiAlias,
             child: AspectRatio(
               aspectRatio: 3 / 4,
-              child: GestureDetector(
-                onPanStart: (details) {
-                  final box = context.findRenderObject() as RenderBox;
-                  final local = box.globalToLocal(details.globalPosition);
-                  setState(() {
-                    _isDrawingZone = true;
-                    _motionZone = Rect.fromLTWH(local.dx / box.size.width, local.dy / box.size.height, 0, 0);
-                  });
-                },
-                onPanUpdate: (details) {
-                  if (!_isDrawingZone) return;
-                  final box = context.findRenderObject() as RenderBox;
-                  final local = box.globalToLocal(details.globalPosition);
-                  setState(() {
-                    final startX = _motionZone.left;
-                    final startY = _motionZone.top;
-                    final endX = (local.dx / box.size.width).clamp(0.0, 1.0);
-                    final endY = (local.dy / box.size.height).clamp(0.0, 1.0);
-                    _motionZone = Rect.fromLTWH(
-                      min(startX, endX),
-                      min(startY, endY),
-                      (endX - startX).abs(),
-                      (endY - startY).abs(),
-                    );
-                  });
-                },
-                onPanEnd: (_) => setState(() => _isDrawingZone = false),
-                child: Stack(fit: StackFit.expand, children: [
-                  // Camera preview
-                  if (_cameraController != null && _cameraController!.value.isInitialized)
-                    FittedBox(
-                      fit: BoxFit.cover,
-                      child: SizedBox(
-                        width: _cameraController!.value.previewSize?.height ?? 320,
-                        height: _cameraController!.value.previewSize?.width ?? 240,
-                        child: CameraPreview(_cameraController!),
-                      ),
-                    )
-                  else
-                    Container(color: Colors.black, child: const Center(child: Text('Camera not active', style: TextStyle(color: Colors.white70)))),
-                  // Motion zone overlay
-                  Positioned.fill(
-                    child: CustomPaint(painter: _MotionZonePainter(zone: _motionZone, isDrawing: _isDrawingZone)),
-                  ),
-                  // Motion level indicator (top-left)
-                  Positioned(
-                    top: 8, left: 8,
-                    child: Container(
+              child: LayoutBuilder(builder: (context, constraints) {
+                return GestureDetector(
+                  onPanStart: (details) {
+                    // Use the GestureDetector's render object, not the parent context.
+                    final box = context.findRenderObject() as RenderBox;
+                    final local = box.globalToLocal(details.globalPosition);
+                    setState(() {
+                      _isDrawingZone = true;
+                      _motionZone = Rect.fromLTWH(
+                        (local.dx / box.size.width).clamp(0.0, 1.0),
+                        (local.dy / box.size.height).clamp(0.0, 1.0),
+                        0, 0,
+                      );
+                    });
+                  },
+                  onPanUpdate: (details) {
+                    if (!_isDrawingZone) return;
+                    final box = context.findRenderObject() as RenderBox;
+                    final local = box.globalToLocal(details.globalPosition);
+                    setState(() {
+                      final startX = _motionZone.left;
+                      final startY = _motionZone.top;
+                      final endX = (local.dx / box.size.width).clamp(0.0, 1.0);
+                      final endY = (local.dy / box.size.height).clamp(0.0, 1.0);
+                      _motionZone = Rect.fromLTWH(
+                        min(startX, endX),
+                        min(startY, endY),
+                        (endX - startX).abs(),
+                        (endY - startY).abs(),
+                      );
+                    });
+                  },
+                  onPanEnd: (_) => setState(() => _isDrawingZone = false),
+                  child: Stack(fit: StackFit.expand, children: [
+                    // Camera preview
+                    if (_cameraController != null && _cameraController!.value.isInitialized)
+                      FittedBox(
+                        fit: BoxFit.cover,
+                        child: SizedBox(
+                          width: _cameraController!.value.previewSize?.height ?? 320,
+                          height: _cameraController!.value.previewSize?.width ?? 240,
+                          child: CameraPreview(_cameraController!),
+                        ),
+                      )
+                    else
+                      Container(color: Colors.black, child: const Center(child: Text('Camera not active', style: TextStyle(color: Colors.white70)))),
+                    // Motion zone overlay
+                    Positioned.fill(
+                      child: CustomPaint(painter: _MotionZonePainter(zone: _motionZone, isDrawing: _isDrawingZone)),
+                    ),
+                    // Motion level indicator (top-left)
+                    Positioned(
+                      top: 8, left: 8,
+                      child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                       decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(4)),
                       child: Text(
@@ -2838,12 +2959,13 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
                     ),
                   ),
                 ]),
-              ),
+                );
+              }),
             ),
           ),
           const SizedBox(height: 8),
-          // Controls
-          Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+          // Controls -- use Wrap to avoid overflow on narrow screens
+          Wrap(alignment: WrapAlignment.center, spacing: 12, runSpacing: 8, children: [
             if (!_isDetectingMotion)
               FilledButton.icon(
                 onPressed: _motionDetectionEnabled ? null : () { setState(() => _motionDetectionEnabled = true); _startMotionDetection(); },
