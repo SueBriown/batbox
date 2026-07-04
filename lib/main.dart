@@ -187,6 +187,15 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
   static const _kAutoStop = 'auto_stop';
   static const _kAutoStopTimeout = 'auto_stop_timeout';
   static const _kHaptic = 'haptic';
+  static const _kDarkMode = 'dark_mode';
+  static const _kCompressPhotos = 'compress_photos';
+  static const _kFastCapture = 'fast_capture';
+  static const _kBurstDelay = 'burst_delay';
+  static const _kMinMatchChunks = 'min_match_chunks';
+  static const _kMotionSensitivity = 'motion_sensitivity';
+  static const _kTriggerSource = 'trigger_source';
+  static const _kCameraIndex = 'camera_index';
+  static const _kCaptureVideo = 'capture_video';
   static const _kReferenceList = 'reference_list';
   static const _kActiveReference = 'active_reference';
 
@@ -235,6 +244,10 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
   bool _photoTriggered = false;
   bool _isCapturingPhoto = false;
   bool _isPlayingReference = false;
+  // Track which reference clip is currently playing:
+  // 'none', 'full', or 'trimmed'. This lets each play button show
+  // the correct state independently.
+  String _playingSource = 'none';
   bool _flashActive = false;
   bool _cameraLaunchInProgress = false;
   double _microphoneLevel = 0.0;
@@ -305,9 +318,23 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
     _initPrefsAndLoad();
     _playerStateSubscription = _audioPlayer.playerStateStream.listen((state) {
       if (!mounted) return;
-      setState(() => _isPlayingReference = state.playing);
-      if (state.processingState == ProcessingState.completed) {
-        if (mounted) setState(() => _isPlayingReference = false);
+      // The playing flag can be unreliable -- use processingState as
+      // the source of truth for whether playback has finished.
+      final isActuallyPlaying = state.playing &&
+          state.processingState != ProcessingState.completed &&
+          state.processingState != ProcessingState.idle;
+      if (!isActuallyPlaying) {
+        setState(() {
+          _isPlayingReference = false;
+          _playingSource = 'none';
+        });
+      } else if (state.processingState == ProcessingState.completed) {
+        setState(() {
+          _isPlayingReference = false;
+          _playingSource = 'none';
+        });
+        // Stop the player to reset its state for next playback.
+        _audioPlayer.stop();
       }
     });
   }
@@ -375,6 +402,15 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
       _autoStopOnSilence = p.getBool(_kAutoStop) ?? false;
       _autoStopTimeoutSec = p.getInt(_kAutoStopTimeout) ?? 30;
       _hapticOnMatch = p.getBool(_kHaptic) ?? true;
+      _isDarkMode = p.getBool(_kDarkMode) ?? true;
+      _compressPhotos = p.getBool(_kCompressPhotos) ?? false;
+      _fastCaptureMode = p.getBool(_kFastCapture) ?? true;
+      _burstDelayMs = p.getInt(_kBurstDelay) ?? 0;
+      _minMatchChunks = p.getInt(_kMinMatchChunks) ?? 1;
+      _motionSensitivity = p.getDouble(_kMotionSensitivity) ?? 0.3;
+      _triggerSource = p.getString(_kTriggerSource) ?? 'sound';
+      _cameraIndex = p.getInt(_kCameraIndex) ?? 0;
+      _captureVideo = p.getBool(_kCaptureVideo) ?? false;
       _activeReferenceName = p.getString(_kActiveReference) ?? '';
     } catch (e) {
       debugPrint('[batbox] _loadSettings failed, using defaults: $e');
@@ -397,6 +433,15 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
       await p.setBool(_kAutoStop, _autoStopOnSilence);
       await p.setInt(_kAutoStopTimeout, _autoStopTimeoutSec);
       await p.setBool(_kHaptic, _hapticOnMatch);
+      await p.setBool(_kDarkMode, _isDarkMode);
+      await p.setBool(_kCompressPhotos, _compressPhotos);
+      await p.setBool(_kFastCapture, _fastCaptureMode);
+      await p.setInt(_kBurstDelay, _burstDelayMs);
+      await p.setInt(_kMinMatchChunks, _minMatchChunks);
+      await p.setDouble(_kMotionSensitivity, _motionSensitivity);
+      await p.setString(_kTriggerSource, _triggerSource);
+      await p.setInt(_kCameraIndex, _cameraIndex);
+      await p.setBool(_kCaptureVideo, _captureVideo);
       await p.setString(_kActiveReference, _activeReferenceName);
     } catch (e) {
       debugPrint('[batbox] _saveSettings failed: $e');
@@ -753,9 +798,10 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
       setState(() => _status = 'No reference to play.');
       return;
     }
+    // If anything is playing (either source), stop it.
     if (_isPlayingReference) {
       await _audioPlayer.stop();
-      setState(() => _isPlayingReference = false);
+      setState(() { _isPlayingReference = false; _playingSource = 'none'; });
       return;
     }
     try {
@@ -764,7 +810,7 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
       await File(path).writeAsBytes(await _encodeWav(_referenceSamples));
       await _audioPlayer.setFilePath(path);
       await _audioPlayer.play();
-      setState(() => _isPlayingReference = true);
+      setState(() { _isPlayingReference = true; _playingSource = 'full'; });
     } catch (e) {
       setState(() => _status = 'Could not play: $e');
     }
@@ -776,9 +822,10 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
       setState(() => _status = 'No reference to play.');
       return;
     }
+    // If anything is playing (either source), stop it.
     if (_isPlayingReference) {
       await _audioPlayer.stop();
-      setState(() => _isPlayingReference = false);
+      setState(() { _isPlayingReference = false; _playingSource = 'none'; });
       return;
     }
     try {
@@ -802,7 +849,7 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
       await File(path).writeAsBytes(await _encodeWav(trimmedSamples));
       await _audioPlayer.setFilePath(path);
       await _audioPlayer.play();
-      setState(() => _isPlayingReference = true);
+      setState(() { _isPlayingReference = true; _playingSource = 'trimmed'; });
     } catch (e) {
       setState(() => _status = 'Could not play trimmed: $e');
     }
@@ -2433,7 +2480,7 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
             IconButton(
               icon: Icon(_isDarkMode ? Icons.light_mode : Icons.dark_mode),
               tooltip: 'Toggle dark mode',
-              onPressed: () => setState(() => _isDarkMode = !_isDarkMode),
+              onPressed: () { setState(() => _isDarkMode = !_isDarkMode); _saveSettings(); },
             ),
             IconButton(icon: const Icon(Icons.help_outline), onPressed: _showInstructions, tooltip: 'Instructions'),
           ],
@@ -2471,7 +2518,7 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
             decoration: BoxDecoration(color: Colors.deepPurple.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(6)),
-            child: const Text('BUILD v12.4 - 2026-06-30 07:00 UTC', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.deepPurple)),
+            child: const Text('BUILD v12.5 - 2026-06-30 07:30 UTC', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.deepPurple)),
           ),
           const SizedBox(height: 16),
 
@@ -2506,7 +2553,7 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
                   final name = e.value.name.isNotEmpty ? e.value.name : 'Camera ${e.key + 1}';
                   return DropdownMenuItem(value: e.key, child: Text(name));
                 }).toList(),
-                onChanged: (v) { if (v != null) _switchCamera(v); },
+                onChanged: (v) { if (v != null) { _switchCamera(v); _saveSettings(); } },
               ),
             ]),
           const SizedBox(height: 4),
@@ -2514,14 +2561,14 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
           SwitchListTile(
             title: const Text('Video mode (10-frame burst)', style: TextStyle(fontSize: 14)),
             value: _captureVideo,
-            onChanged: (v) => setState(() => _captureVideo = v),
+            onChanged: (v) { setState(() => _captureVideo = v); _saveSettings(); },
             dense: true,
           ),
           // #11: Photo compression toggle
           SwitchListTile(
             title: const Text('Compress photos (80% JPEG)', style: TextStyle(fontSize: 14)),
             value: _compressPhotos,
-            onChanged: (v) => setState(() => _compressPhotos = v),
+            onChanged: (v) { setState(() => _compressPhotos = v); _saveSettings(); },
             dense: true,
           ),
           // Fast capture mode (for bat photography -- lowest latency)
@@ -2529,7 +2576,7 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
             title: const Text('Fast capture (low res, deferred save)', style: TextStyle(fontSize: 14)),
             subtitle: const Text('Optimized for fast-moving subjects', style: TextStyle(fontSize: 11)),
             value: _fastCaptureMode,
-            onChanged: (v) => setState(() => _fastCaptureMode = v),
+            onChanged: (v) { setState(() => _fastCaptureMode = v); _saveSettings(); },
             dense: true,
           ),
           if (_fastCaptureMode && _photoCountMode.burstSize > 1)
@@ -2538,7 +2585,7 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
             SizedBox(width: 280, child: Slider(
               value: _burstDelayMs.toDouble(), min: 0, max: 500, divisions: 50,
               label: '${_burstDelayMs}ms',
-              onChanged: (v) => setState(() => _burstDelayMs = v.round()),
+              onChanged: (v) { setState(() => _burstDelayMs = v.round()); _saveSettings(); },
             )),
           const SizedBox(height: 8),
           // #4: Match debounce slider
@@ -2546,7 +2593,7 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
           SizedBox(width: 280, child: Slider(
             value: _minMatchChunks.toDouble(), min: 1, max: 10, divisions: 9,
             label: '$_minMatchChunks',
-            onChanged: (v) => setState(() => _minMatchChunks = v.round()),
+            onChanged: (v) { setState(() => _minMatchChunks = v.round()); _saveSettings(); },
           )),
           const SizedBox(height: 8),
           // #18: Scheduled triggers
@@ -2827,7 +2874,7 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
             ),
           const SizedBox(height: 8),
           if (_hasReference)
-            FilledButton.icon(onPressed: _playReferenceSound, icon: Icon(_isPlayingReference ? Icons.stop : Icons.play_arrow), label: Text(_isPlayingReference ? 'Stop' : 'Play active reference')),
+            FilledButton.icon(onPressed: _playReferenceSound, icon: Icon(_playingSource == 'full' ? Icons.stop : Icons.play_arrow), label: Text(_playingSource == 'full' ? 'Stop' : 'Play active reference')),
           const SizedBox(height: 16),
 
           // Trim controls (reversible -- original audio is never deleted)
@@ -2923,8 +2970,8 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
             // Play trimmed reference button
             FilledButton.icon(
               onPressed: _playTrimmedReference,
-              icon: Icon(_isPlayingReference ? Icons.stop : Icons.play_arrow),
-              label: Text(_isPlayingReference ? 'Stop' : 'Play trimmed reference'),
+              icon: Icon(_playingSource == 'trimmed' ? Icons.stop : Icons.play_arrow),
+              label: Text(_playingSource == 'trimmed' ? 'Stop' : 'Play trimmed reference'),
             ),
             const SizedBox(height: 8),
           ],
@@ -3123,17 +3170,17 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
             value: _motionSensitivity,
             min: 0.05, max: 0.95, divisions: 18,
             label: '${(_motionSensitivity * 100).round()}%',
-            onChanged: (v) => setState(() { _motionSensitivity = v; _previousFrame = null; }),
+            onChanged: (v) { setState(() { _motionSensitivity = v; _previousFrame = null; }); _saveSettings(); },
           ),
           const SizedBox(height: 8),
           // Trigger source selector
           const Text('Trigger source:', style: TextStyle(fontWeight: FontWeight.bold)),
           const SizedBox(height: 4),
           Wrap(spacing: 8, children: [
-            ChoiceChip(label: const Text('Sound only'), selected: _triggerSource == 'sound', onSelected: (_) => setState(() => _triggerSource = 'sound')),
-            ChoiceChip(label: const Text('Motion only'), selected: _triggerSource == 'motion', onSelected: (_) => setState(() => _triggerSource = 'motion')),
-            ChoiceChip(label: const Text('Either'), selected: _triggerSource == 'either', onSelected: (_) => setState(() => _triggerSource = 'either')),
-            ChoiceChip(label: const Text('Both (sound AND motion)'), selected: _triggerSource == 'both', onSelected: (_) => setState(() => _triggerSource = 'both')),
+            ChoiceChip(label: const Text('Sound only'), selected: _triggerSource == 'sound', onSelected: (_) { setState(() => _triggerSource = 'sound'); _saveSettings(); }),
+            ChoiceChip(label: const Text('Motion only'), selected: _triggerSource == 'motion', onSelected: (_) { setState(() => _triggerSource = 'motion'); _saveSettings(); }),
+            ChoiceChip(label: const Text('Either'), selected: _triggerSource == 'either', onSelected: (_) { setState(() => _triggerSource = 'either'); _saveSettings(); }),
+            ChoiceChip(label: const Text('Both (sound AND motion)'), selected: _triggerSource == 'both', onSelected: (_) { setState(() => _triggerSource = 'both'); _saveSettings(); }),
           ]),
           const SizedBox(height: 8),
           // Instructions
