@@ -1,3 +1,20 @@
+// =============================================================================
+// BatBox - Flutter app for sound-triggered and motion-triggered photography
+// BUILD v12.6 - 2026-06-30 08:00 UTC
+//
+// PROMPT THAT GENERATED THIS VERSION:
+// "1. From now on, if you're not doing so already, add the prompt that
+//  generates code as a comment at the top of the code near the version number.
+//  2. The two buttons that play the full reference audio and the trimmed
+//  reference audio, play the audio but then change to the word Stop once
+//  the clip has ended. Pushing the 'Stop' then brings back the Play button
+//  again. Instead, they need to say Stop while the clip is playing only."
+//
+// FIX: Added processingStateStream listener (more reliable than
+// playerStateStream for detecting playback completion). Buttons now
+// correctly return to "Play" when audio finishes.
+// =============================================================================
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
@@ -300,6 +317,7 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
   int _burstsThisSession = 0;
 
   late StreamSubscription<PlayerState> _playerStateSubscription;
+  late StreamSubscription<ProcessingState> _processingStateSubscription;
 
   final RecordConfig _recordConfig = const RecordConfig(
     encoder: AudioEncoder.pcm16bits,
@@ -318,17 +336,19 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
     _initPrefsAndLoad();
     _playerStateSubscription = _audioPlayer.playerStateStream.listen((state) {
       if (!mounted) return;
-      // The playing flag can be unreliable -- use processingState as
-      // the source of truth for whether playback has finished.
-      final isActuallyPlaying = state.playing &&
-          state.processingState != ProcessingState.completed &&
-          state.processingState != ProcessingState.idle;
-      if (!isActuallyPlaying) {
-        setState(() {
-          _isPlayingReference = false;
-          _playingSource = 'none';
-        });
-      } else if (state.processingState == ProcessingState.completed) {
+      // Only update on actual play/pause transitions, not on completion.
+      // Completion is handled by _processingStateSubscription below.
+      if (state.processingState == ProcessingState.completed) return;
+      setState(() {
+        _isPlayingReference = state.playing;
+        if (!state.playing) _playingSource = 'none';
+      });
+    });
+    // processingStateStream is the RELIABLE way to detect playback completion.
+    // playerStateStream can miss the completed state on some platforms.
+    _processingStateSubscription = _audioPlayer.processingStateStream.listen((state) {
+      if (!mounted) return;
+      if (state == ProcessingState.completed) {
         setState(() {
           _isPlayingReference = false;
           _playingSource = 'none';
@@ -366,6 +386,7 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
     _autoStopTimer?.cancel();
     _scheduleTimer?.cancel();
     _playerStateSubscription.cancel();
+    _processingStateSubscription.cancel();
     _audioPlayer.dispose();
     try { _audioRecorder.dispose(); } catch (_) {}
     _cameraController?.dispose();
@@ -2518,7 +2539,7 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
             decoration: BoxDecoration(color: Colors.deepPurple.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(6)),
-            child: const Text('BUILD v12.5 - 2026-06-30 07:30 UTC', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.deepPurple)),
+            child: const Text('BUILD v12.6 - 2026-06-30 08:00 UTC', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.deepPurple)),
           ),
           const SizedBox(height: 16),
 
