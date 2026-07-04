@@ -211,7 +211,7 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
   double _currentBestSimilarity = 0.0;
   double _sessionPeakSimilarity = 0.0;
   int _consecutiveMatchCount = 0;
-  int _minMatchChunks = 2; // adjustable, ~100ms per chunk at 10 chunks/sec
+  int _minMatchChunks = 1; // default 1 = instant trigger (was 2)
   DateTime _lastTriggerTime = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastLoudAudioTime = DateTime.fromMillisecondsSinceEpoch(0);
 
@@ -244,6 +244,11 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
   bool _isDarkMode = true; // start in dark mode
   // #11: Photo compression
   bool _compressPhotos = false;
+  // Fast capture mode: lowest resolution, deferred file copy,
+  // minimal UI updates during burst. Optimized for bat photography.
+  bool _fastCaptureMode = true;
+  // Burst rate: delay between burst photos (0 = as fast as possible).
+  int _burstDelayMs = 0;
   // #21: Camera index (0=back, 1=front, 2+=other lenses)
   int _cameraIndex = 0;
   // #22: Video mode
@@ -1499,7 +1504,7 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
   // Photo capture
   // ===========================================================================
 
-  Future<void> _takeSinglePhoto() async {
+  Future<String> _takeSinglePhoto() async {
     if (_cameraController == null || !_cameraController!.value.isInitialized) {
       await _initializeCamera().timeout(const Duration(seconds: 5),
           onTimeout: () => throw Exception('Camera init timed out.'));
@@ -1507,10 +1512,19 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
     if (_cameraController == null || !_cameraController!.value.isInitialized) {
       throw Exception('Camera init failed.');
     }
+    // Take the photo -- this is the latency-critical step.
+    // In fast mode we skip the file copy (returns the temp path).
     final photo = await _cameraController!.takePicture().timeout(const Duration(seconds: 5),
         onTimeout: () => throw Exception('Camera capture timed out.'));
-    final saved = await _saveCapturedPhoto(photo.path);
-    if (mounted) setState(() => _lastSavedPhotoPath = saved.path);
+    if (_fastCaptureMode) {
+      // Return the temp path -- caller batches the copy after the burst.
+      return photo.path;
+    } else {
+      // Copy immediately (slower but safer if app crashes mid-burst).
+      final saved = await _saveCapturedPhoto(photo.path);
+      if (mounted) setState(() => _lastSavedPhotoPath = saved.path);
+      return saved.path;
+    }
   }
 
   /// #22: Capture a short video clip instead of a photo.
@@ -1572,12 +1586,40 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
     _cameraLaunchInProgress = true;
     final burstSize = _photoCountMode.burstSize;
     final stopAfter = _photoCountMode.stopAfterFirstMatch;
-    setState(() { _photoTriggered = true; _isCapturingPhoto = true; });
+    // DON'T setState here -- in fast mode we want to capture IMMEDIATELY
+    // without waiting for a UI rebuild. Set the flags synchronously.
+    _photoTriggered = true;
+    _isCapturingPhoto = true;
+    // Collect temp paths in fast mode for batch copy after burst.
+    final tempPaths = <String>[];
     try {
       for (var i = 0; i < burstSize; i++) {
-        await _takeSinglePhoto();
+        final path = await _takeSinglePhoto();
+        if (_fastCaptureMode) {
+          tempPaths.add(path);
+        }
         _photosTakenThisSession++;
-        if (mounted) setState(() => _status = 'Burst: ${i + 1}/$burstSize...');
+        // Only update UI if NOT in fast mode (saves ~16ms per frame).
+        if (!_fastCaptureMode && mounted) {
+          setState(() => _status = 'Burst: ${i + 1}/$burstSize...');
+        }
+        // Optional inter-burst delay (0 = fire as fast as possible).
+        if (_burstDelayMs > 0 && i < burstSize - 1) {
+          await Future.delayed(Duration(milliseconds: _burstDelayMs));
+        }
+      }
+      // In fast mode, batch-copy the temp files to permanent storage.
+      if (_fastCaptureMode && tempPaths.isNotEmpty) {
+        for (final tempPath in tempPaths) {
+          try {
+            final saved = await _saveCapturedPhoto(tempPath);
+            if (mounted) setState(() => _lastSavedPhotoPath = saved.path);
+            // Clean up temp file.
+            try { await File(tempPath).delete(); } catch (_) {}
+          } catch (e) {
+            debugPrint('[batbox] failed to save photo: $e');
+          }
+        }
       }
       if (stopAfter) {
         await _stopListening();
@@ -1606,9 +1648,23 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
             (c) => c.lensDirection == CameraLensDirection.back,
             orElse: () => _availableCameras.first,
           );
-    _cameraController = CameraController(camera, _resolutionSetting.preset, enableAudio: false);
+    // In fast capture mode, override resolution to low for minimal latency.
+    // Lower resolution = less data to process = faster takePicture().
+    final preset = _fastCaptureMode ? ResolutionPreset.low : _resolutionSetting.preset;
+    _cameraController = CameraController(
+      camera,
+      preset,
+      enableAudio: false,
+      imageFormatGroup: ImageFormatGroup.jpeg,
+    );
     await _cameraController!.initialize();
     await _applyFlashMode();
+    // Pre-set focus mode to auto for faster first-shot capture.
+    try {
+      await _cameraController!.setFocusMode(FocusMode.auto);
+    } catch (_) {
+      // Some cameras don't support focus mode setting.
+    }
   }
 
   /// #21: Switch to a different camera.
@@ -2256,10 +2312,24 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
     }
     try {
       final burstSize = _photoCountMode.burstSize;
+      final tempPaths = <String>[];
       for (var i = 0; i < burstSize; i++) {
-        await _takeSinglePhoto();
+        final path = await _takeSinglePhoto();
+        if (_fastCaptureMode) tempPaths.add(path);
         _photosTakenThisSession++;
-        if (mounted) setState(() => _status = 'Motion! Burst ${i + 1}/$burstSize...');
+        if (!_fastCaptureMode && mounted) setState(() => _status = 'Motion! Burst ${i + 1}/$burstSize...');
+        if (_burstDelayMs > 0 && i < burstSize - 1) {
+          await Future.delayed(Duration(milliseconds: _burstDelayMs));
+        }
+      }
+      // Batch copy in fast mode
+      if (_fastCaptureMode) {
+        for (final tempPath in tempPaths) {
+          try {
+            final saved = await _saveCapturedPhoto(tempPath);
+            try { await File(tempPath).delete(); } catch (_) {}
+          } catch (_) {}
+        }
       }
       if (_photoCountMode.stopAfterFirstMatch) {
         if (mounted) setState(() => _status = 'Motion detected. $burstSize photo(s) taken.');
@@ -2401,7 +2471,7 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
             decoration: BoxDecoration(color: Colors.deepPurple.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(6)),
-            child: const Text('BUILD v12.3 - 2026-06-30 06:30 UTC', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.deepPurple)),
+            child: const Text('BUILD v12.4 - 2026-06-30 07:00 UTC', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.deepPurple)),
           ),
           const SizedBox(height: 16),
 
@@ -2454,6 +2524,22 @@ class _BatboxAppState extends State<BatboxApp> with TickerProviderStateMixin {
             onChanged: (v) => setState(() => _compressPhotos = v),
             dense: true,
           ),
+          // Fast capture mode (for bat photography -- lowest latency)
+          SwitchListTile(
+            title: const Text('Fast capture (low res, deferred save)', style: TextStyle(fontSize: 14)),
+            subtitle: const Text('Optimized for fast-moving subjects', style: TextStyle(fontSize: 11)),
+            value: _fastCaptureMode,
+            onChanged: (v) => setState(() => _fastCaptureMode = v),
+            dense: true,
+          ),
+          if (_fastCaptureMode && _photoCountMode.burstSize > 1)
+            Text('Burst delay: ${_burstDelayMs}ms (0 = max speed)', style: Theme.of(context).textTheme.bodySmall),
+          if (_fastCaptureMode && _photoCountMode.burstSize > 1)
+            SizedBox(width: 280, child: Slider(
+              value: _burstDelayMs.toDouble(), min: 0, max: 500, divisions: 50,
+              label: '${_burstDelayMs}ms',
+              onChanged: (v) => setState(() => _burstDelayMs = v.round()),
+            )),
           const SizedBox(height: 8),
           // #4: Match debounce slider
           Text('Match debounce: ${_minMatchChunks} chunks (~${_minMatchChunks * 100}ms)', style: Theme.of(context).textTheme.bodySmall),
